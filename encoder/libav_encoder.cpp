@@ -20,7 +20,7 @@
 
 void LibAvEncoder::initVideoCodec(VideoOptions const *options, StreamInfo const &info)
 {
-	const std::string codec_name("h264_v4l2m2m");
+	const std::string codec_name("libx264");
 
 	const AVCodec *codec = avcodec_find_encoder_by_name(codec_name.c_str());
 	if (!codec)
@@ -35,7 +35,7 @@ void LibAvEncoder::initVideoCodec(VideoOptions const *options, StreamInfo const 
 	// usec timebase
 	codec_ctx_[Video]->time_base = { 1, 1000 * 1000 };
 	codec_ctx_[Video]->framerate = { (int)(options->framerate.value_or(DEFAULT_FRAMERATE) * 1000), 1000 };
-	codec_ctx_[Video]->pix_fmt = AV_PIX_FMT_DRM_PRIME;
+	codec_ctx_[Video]->pix_fmt = AV_PIX_FMT_YUV420P;
 	codec_ctx_[Video]->sw_pix_fmt = AV_PIX_FMT_YUV420P;
 
 	if (info.colour_space)
@@ -101,8 +101,10 @@ void LibAvEncoder::initVideoCodec(VideoOptions const *options, StreamInfo const 
 
 	codec_ctx_[Video]->level = options->level.empty() ? FF_LEVEL_UNKNOWN : std::stof(options->level) * 10;
 
-	if (options->intra)
-		codec_ctx_[Video]->gop_size = options->intra;
+	codec_ctx_[Video]->gop_size = options->intra ? options->intra : 10;
+	codec_ctx_[Video]->max_b_frames = 0;
+
+	av_opt_set(codec_ctx_[Video]->priv_data, "preset", "ultrafast", 0);
 
 	assert(out_fmt_ctx_ == nullptr);
 	avformat_alloc_output_context2(&out_fmt_ctx_, nullptr,
@@ -265,7 +267,20 @@ LibAvEncoder::~LibAvEncoder()
 		avcodec_free_context(&codec_ctx_[AudioOut]);
 	}
 
+	for (auto &[fd, buf] : bufferMap_)
+		munmap(buf.first, buf.second);
+
 	LOG(2, "libav: codec closed");
+}
+
+extern "C" void releaseBuffer_(void *opaque, uint8_t *data)
+{
+	static_cast<LibAvEncoder *>(opaque)->releaseBuffer(data);
+}
+
+void LibAvEncoder::releaseBuffer(uint8_t *buffer)
+{
+	input_done_callback_(nullptr);
 }
 
 void LibAvEncoder::EncodeBuffer(int fd, size_t size, void *mem, StreamInfo const &info, int64_t timestamp_us)
@@ -277,33 +292,28 @@ void LibAvEncoder::EncodeBuffer(int fd, size_t size, void *mem, StreamInfo const
 	if (!video_start_ts_)
 		video_start_ts_ = timestamp_us;
 
-	frame->format = AV_PIX_FMT_DRM_PRIME;
+	frame->format = AV_PIX_FMT_YUV420P;
 	frame->width = info.width;
 	frame->height = info.height;
 	frame->linesize[0] = info.stride;
+	frame->linesize[1] = frame->linesize[2] = info.stride >> 1;
 	frame->pts = timestamp_us - video_start_ts_ + (options_->av_sync < 0 ? -options_->av_sync : 0);
 
-	frame->buf[0] = av_buffer_alloc(sizeof(AVDRMFrameDescriptor));
-	frame->data[0] = frame->buf[0]->data;
+	uint8_t *buffer = nullptr;
 
-	AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)frame->data[0];
-	desc->nb_objects = 1;
-	desc->objects[0].fd = fd;
-	desc->objects[0].size = size;
-	desc->objects[0].format_modifier = DRM_FORMAT_MOD_INVALID;
+	auto buf = bufferMap_.find(fd);
+	if (buf == bufferMap_.end())
+	{
+		buffer = (uint8_t *)mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		assert(buffer);
+		bufferMap_[fd] = { buffer, size };
+	}
+	else
+		buffer = buf->second.first;
 
-	desc->nb_layers = 1;
-	desc->layers[0].format = DRM_FORMAT_YUV420;
-	desc->layers[0].nb_planes = 3;
-	desc->layers[0].planes[0].object_index = 0;
-	desc->layers[0].planes[0].offset = 0;
-	desc->layers[0].planes[0].pitch = info.stride;
-	desc->layers[0].planes[1].object_index = 0;
-	desc->layers[0].planes[1].offset = info.stride * info.height;
-	desc->layers[0].planes[1].pitch = info.stride >> 1;
-	desc->layers[0].planes[2].object_index = 0;
-	desc->layers[0].planes[2].offset = info.stride * info.height * 5 / 4;
-	desc->layers[0].planes[2].pitch = info.stride >> 1;
+	frame->buf[0] = av_buffer_create(buffer, size, &releaseBuffer_, this, 0);
+	av_image_fill_pointers(frame->data, AV_PIX_FMT_YUV420P, frame->height, frame->buf[0]->data, frame->linesize);
+	av_frame_make_writable(frame);
 
 	std::scoped_lock<std::mutex> lock(video_mutex_);
 	frame_queue_.push(frame);
@@ -426,8 +436,6 @@ void LibAvEncoder::videoThread()
 		int ret = avcodec_send_frame(codec_ctx_[Video], frame);
 		if (ret < 0)
 			throw std::runtime_error("libav: error encoding frame: " + std::to_string(ret));
-
-		input_done_callback_(nullptr);
 
 		encode(pkt, Video);
 		av_frame_free(&frame);

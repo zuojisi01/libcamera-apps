@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -21,6 +22,7 @@ extern "C"
 #include "libavutil/audio_fifo.h"
 #include "libavutil/hwcontext.h"
 #include "libavutil/hwcontext_drm.h"
+#include "libavutil/imgutils.h"
 #include "libavutil/timestamp.h"
 #include "libavutil/version.h"
 #include "libswresample/swresample.h"
@@ -35,6 +37,7 @@ public:
 	~LibAvEncoder();
 	// Encode the given DMABUF.
 	void EncodeBuffer(int fd, size_t size, void *mem, StreamInfo const &info, int64_t timestamp_us) override;
+	void releaseBuffer(uint8_t *buffer);
 
 private:
 	void initVideoCodec(VideoOptions const *options, StreamInfo const &info);
@@ -67,4 +70,6 @@ private:
 	AVStream *stream_[3];
 	AVFormatContext *in_fmt_ctx_;
 	AVFormatContext *out_fmt_ctx_;
+
+	std::map<int, std::pair<uint8_t *, std::size_t>> bufferMap_;
 };
