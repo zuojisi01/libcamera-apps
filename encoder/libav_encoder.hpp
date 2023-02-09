@@ -9,7 +9,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <map>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -70,6 +69,4 @@ private:
 	AVStream *stream_[3];
 	AVFormatContext *in_fmt_ctx_;
 	AVFormatContext *out_fmt_ctx_;
-
-	std::map<int, std::pair<uint8_t *, std::size_t>> bufferMap_;
 };

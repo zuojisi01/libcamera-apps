@@ -103,8 +103,11 @@ void LibAvEncoder::initVideoCodec(VideoOptions const *options, StreamInfo const 
 
 	codec_ctx_[Video]->gop_size = options->intra ? options->intra : 10;
 	codec_ctx_[Video]->max_b_frames = 0;
+	codec_ctx_[Video]->me_range = 256 * 4; // x4 for sub-pixel range
 
-	av_opt_set(codec_ctx_[Video]->priv_data, "preset", "ultrafast", 0);
+	av_opt_set(codec_ctx_[Video]->priv_data, "preset", "superfast", 0);
+	av_opt_set(codec_ctx_[Video]->priv_data, "partitions", "i8x8,i4x4", 0);
+	av_opt_set(codec_ctx_[Video]->priv_data, "weightp", "0", 0);
 
 	assert(out_fmt_ctx_ == nullptr);
 	avformat_alloc_output_context2(&out_fmt_ctx_, nullptr,
@@ -267,9 +270,6 @@ LibAvEncoder::~LibAvEncoder()
 		avcodec_free_context(&codec_ctx_[AudioOut]);
 	}
 
-	for (auto &[fd, buf] : bufferMap_)
-		munmap(buf.first, buf.second);
-
 	LOG(2, "libav: codec closed");
 }
 
@@ -299,19 +299,7 @@ void LibAvEncoder::EncodeBuffer(int fd, size_t size, void *mem, StreamInfo const
 	frame->linesize[1] = frame->linesize[2] = info.stride >> 1;
 	frame->pts = timestamp_us - video_start_ts_ + (options_->av_sync < 0 ? -options_->av_sync : 0);
 
-	uint8_t *buffer = nullptr;
-
-	auto buf = bufferMap_.find(fd);
-	if (buf == bufferMap_.end())
-	{
-		buffer = (uint8_t *)mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-		assert(buffer);
-		bufferMap_[fd] = { buffer, size };
-	}
-	else
-		buffer = buf->second.first;
-
-	frame->buf[0] = av_buffer_create(buffer, size, &releaseBuffer_, this, 0);
+	frame->buf[0] = av_buffer_create((uint8_t *)mem, size, &releaseBuffer_, this, 0);
 	av_image_fill_pointers(frame->data, AV_PIX_FMT_YUV420P, frame->height, frame->buf[0]->data, frame->linesize);
 	av_frame_make_writable(frame);
 
