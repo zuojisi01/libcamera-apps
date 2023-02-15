@@ -52,10 +52,26 @@ void encoderOptionsLibx264(VideoOptions const *options, AVCodecContext *codec)
 	av_opt_set(codec->priv_data, "mixed_ref", "0", 0);
 }
 
+void encoderOptionsLibx265(VideoOptions const *options, AVCodecContext *codec)
+{
+	codec->pix_fmt = AV_PIX_FMT_YUV420P;
+	codec->refs = 1;
+	codec->thread_count = 6;
+	codec->max_b_frames = 0; // No chroma ME
+
+	if (options->bitrate)
+		codec->bit_rate = options->bitrate * 1000;
+
+	av_opt_set(codec->priv_data, "preset", "ultrafast", 0);
+	av_opt_set(codec->priv_data, "tune", "zerolatency", 0);
+	av_opt_set(codec->priv_data, "x265-params", "bframes=0:rc-lookahead=0:merange=33:max-merge=1", 0);
+}
+
 const std::map<std::string, std::function<void(VideoOptions const *, AVCodecContext *)>> optionsMap =
 {
 	{ "h264_v4l2m2m", encoderOptionsH264M2M },
 	{ "libx264", encoderOptionsLibx264 },
+	{ "libx265", encoderOptionsLibx265 },
 };
 
 } // namespace
